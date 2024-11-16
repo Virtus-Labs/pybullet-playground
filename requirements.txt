@@ -1,3 +1,2 @@
 numpy==1.26.4
-tkinter==8.6
 pybullet==3.2.6

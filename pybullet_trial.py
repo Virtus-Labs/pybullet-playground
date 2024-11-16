@@ -8,9 +8,24 @@ import os
 import shutil
 import xml.etree.ElementTree as ET
 import numpy as np
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+
+# Create a minimal node for publishing
+class MinimalPublisher(Node):
+    def __init__(self):
+        super().__init__('pybullet_publisher')
+        self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
 
 class RobotSimulation:
     def __init__(self):
+        # Initialize ROS2
+        rclpy.init()
+        
+        #  Create minimal publisher node
+        self.ros_node = MinimalPublisher()
+
         # Initialize PyBullet
         self.physicsClient = p.connect(p.GUI,options="--disable_grid=1")
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -26,11 +41,6 @@ class RobotSimulation:
             cameraTargetPosition=[0, 0, 0]
         )
 
-        # Load ground plane
-        # self.plane = p.loadURDF("plane.urdf")
-        # p.changeVisualShape(self.plane, -1, rgbaColor=[0.2, 0.8, 0.2, 1])  # Green color with alpha=1
-        # Load the custom ground plane
-        # self.plane = p.loadURDF('temp/flat_ground.urdf', [0, 0, -0.01], useFixedBase=1)
         self.create_flat_ground()
         self.create_obstacles()
         # Initialize robot state
@@ -46,7 +56,7 @@ class RobotSimulation:
             os.makedirs('temp')
 
         # Camera settings
-        self.camera_width = 320  # Reduced size to match the UI panel
+        self.camera_width = 320  
         self.camera_height = 240
         self.camera_fov = 60
         self.camera_aspect = self.camera_width / self.camera_height
@@ -193,7 +203,7 @@ class RobotSimulation:
         self.debug_params['left'] = p.addUserDebugParameter("Turn Left", 1, 0, 0)
         self.debug_params['right'] = p.addUserDebugParameter("Turn Right", 1, 0, 0)
         self.debug_params['stop'] = p.addUserDebugParameter("Stop", 1, 0, 0)
-        self.debug_params['speed'] = p.addUserDebugParameter("Speed", -100, 100, 1.0)
+        self.debug_params['speed'] = p.addUserDebugParameter("Speed", -100, 100, 10.0)
         
         # Store previous button states
         self.prev_button_states = {key: 0 for key in self.debug_params}
@@ -275,6 +285,19 @@ class RobotSimulation:
             return True
         return False
     
+    def publish_twist_message(self, linear_x, angular_z):
+        """Publish Twist message based on robot movement"""
+        twist_msg = Twist()
+        twist_msg.linear.x = float(linear_x)
+        twist_msg.linear.y = 0.0
+        twist_msg.linear.z = 0.0
+        twist_msg.angular.x = 0.0
+        twist_msg.angular.y = 0.0
+        twist_msg.angular.z = float(angular_z)
+        
+        self.ros_node.publisher.publish(twist_msg)
+        print(f'Published Twist - linear.x: {linear_x}, angular.z: {angular_z}')
+
     def set_wheel_velocities(self, left_vel, right_vel):
         """Set velocities for all wheels based on side"""
         if not self.wheel_joints:
@@ -283,6 +306,17 @@ class RobotSimulation:
         # Store current velocities
         self.left_wheel_velocity = left_vel
         self.right_wheel_velocity = right_vel
+
+        # Calculate linear and angular velocities for Twist message
+        wheel_radius = 0.0625  # Adjust based on your robot's wheel size
+        wheel_separation = 0.26  # Adjust based on your robot's wheel separation
+        sim2real_ratio = 0.5
+        # Calculate linear and angular velocities
+        linear_x = sim2real_ratio * wheel_radius * (right_vel + left_vel) / 2.0
+        angular_z = sim2real_ratio * wheel_radius * (left_vel - right_vel) / wheel_separation
+        
+        # Publish Twist message
+        self.publish_twist_message(linear_x, angular_z)
         
         for joint_info in self.wheel_joints.values():
             # Get the exact velocity based on wheel side
@@ -325,7 +359,10 @@ class RobotSimulation:
         # If movement hasn't changed, maintain current velocities
         if previous_movement == self.current_movement and self.current_movement != 'stop':
             self.set_wheel_velocities(self.left_wheel_velocity, self.right_wheel_velocity)
-    
+
+        # Process any pending ROS callbacks
+        rclpy.spin_once(self.ros_node, timeout_sec=0)
+
     def get_camera_view(self):
         """Update camera view from robot's perspective"""
         if self.robot is None:
@@ -387,7 +424,7 @@ class RobotSimulation:
             self.update_robot_movement()
             self.get_camera_view()
             p.stepSimulation()
-            time.sleep(0.0001)
+            time.sleep(0.00001)
 
     def start_simulation(self):
         self.simulation_thread = threading.Thread(target=self.simulation_loop)
@@ -401,13 +438,15 @@ class RobotSimulation:
         p.disconnect()
         if os.path.exists('temp'):
             shutil.rmtree('temp')
+        self.ros_node.destroy_node()
+        rclpy.shutdown()
 
 def main():
     sim = None
     try:
         sim = RobotSimulation()
         while True:
-            time.sleep(0.001)
+            time.sleep(0.00001)
     except KeyboardInterrupt:
         print("\nShutting down simulation...")
     finally:
