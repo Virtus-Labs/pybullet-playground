@@ -1,6 +1,64 @@
 import tkinter as tk
 from tkinter import ttk
 import tkinter.font as tkfont
+import pybullet as p
+import pybullet_data
+import time
+import threading
+import os
+import OpenGL
+import ctypes
+from PIL import Image, ImageTk
+import numpy as np
+
+class PhysicsSimulator:
+    def __init__(self, canvas_width=800, canvas_height=600):
+        self.width = canvas_width
+        self.height = canvas_height
+        self.physics_client = p.connect(p.DIRECT)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        p.setGravity(0, 0, -9.81)
+        p.loadURDF("plane.urdf")
+        p.loadURDF("cube.urdf", [0, 0, 1])
+        
+        # Setup camera
+        self.view_matrix = p.computeViewMatrix(
+            cameraEyePosition=[2, 2, 2],
+            cameraTargetPosition=[0, 0, 0],
+            cameraUpVector=[0, 0, 1]
+        )
+        self.proj_matrix = p.computeProjectionMatrixFOV(
+            fov=60,
+            aspect=float(canvas_width)/canvas_height,
+            nearVal=0.1,
+            farVal=100.0
+        )
+        self.running = True
+
+    def get_frame(self):
+        # Get rendering from PyBullet
+        width, height, rgba, depth, seg = p.getCameraImage(
+            width=self.width,
+            height=self.height,
+            viewMatrix=self.view_matrix,
+            projectionMatrix=self.proj_matrix,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL
+        )
+        
+        # Convert to PIL Image
+        rgba_array = np.reshape(rgba, (height, width, 4))
+        rgb_array = rgba_array[:, :, :3]
+        return Image.fromarray(rgb_array)
+
+    def step(self):
+        while self.running:
+            p.stepSimulation()
+            time.sleep(1/240)
+
+    def stop(self):
+        self.running = False
+        p.disconnect()
+
 
 class IDEApp:
     def __init__(self, root):
@@ -64,11 +122,17 @@ class IDEApp:
         self.create_code_editor()
         
         # Create preview
-        self.create_preview()
+        self.simulator = None
+        self.sim_thread = None
+        self.render_thread = None
+        self.create_simulator_preview()
         
         # Set initial proportions
         self.root.update()
         self.set_paned_proportions()
+
+    def __del__(self):
+        self.stop_simulation()
         
     def set_paned_proportions(self):
         # Get total width (excluding icon sidebar)
@@ -126,18 +190,7 @@ class IDEApp:
                               fill=self.text_color,
                               font=('Arial', 10, 'bold'))
 
-        # Project dropdown
-        # project_menu = tk.Menu(toolbar, tearoff=0, bg=self.bg_darker, fg=self.text_color,
-        #                      activebackground=self.bg_lighter, activeforeground=self.text_color)
-        # project_menu.add_command(label="New Project...")
-        # project_menu.add_command(label="Open Project...")
-        # project_menu.add_separator()
-        # project_menu.add_command(label="Close Project")
-        
-        # project_btn = ttk.Menubutton(left_tools, text="MyProject", style="Toolbar.TMenubutton")
-        # project_btn['menu'] = project_menu
-        # project_btn.pack(side=tk.LEFT, padx=(2, 2))
-        # Configure combobox style
+        # dropdown style
         self.style.configure("Toolbar.TCombobox",
                             fieldbackground=self.bg_darker,
                             background=self.bg_darker,
@@ -267,6 +320,29 @@ class IDEApp:
         # Sync line numbers with editor scroll
         self.line_numbers.yview_moveto(args[0])
         scrollbar.set(*args)
+
+    def start_simulation(self):
+        if self.simulator is None:
+            self.simulator = PhysicsSimulator()
+            self.sim_thread = threading.Thread(target=self.simulator.step)
+            self.render_thread = threading.Thread(target=self.render_loop)
+            self.sim_thread.start()
+            self.render_thread.start()
+
+    def render_loop(self):
+        while self.simulator and self.simulator.running:
+            frame = self.simulator.get_frame()
+            photo = ImageTk.PhotoImage(frame)
+            self.sim_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+            self.sim_canvas.image = photo  # Keep reference
+            time.sleep(1/30)  # 30 FPS
+
+    def stop_simulation(self):
+        if self.simulator:
+            self.simulator.stop()
+            self.sim_thread.join()
+            self.render_thread.join()
+            self.simulator = None
         
     def create_preview(self):
         # Preview frame
@@ -281,6 +357,36 @@ class IDEApp:
                                bg=self.bg_darker, fg=self.text_color,
                                padx=10, pady=5)
         preview_label.pack(side=tk.LEFT)
+
+    def create_simulator_preview(self):
+        preview_frame = tk.Frame(self.editor_preview_paned, bg=self.bg_darker)
+        self.editor_preview_paned.add(preview_frame)
+
+        # Header
+        header_frame = tk.Frame(preview_frame, bg=self.bg_darker)
+        header_frame.pack(fill=tk.X)
+
+        preview_label = tk.Label(header_frame, text="Simulator Preview",
+                               bg=self.bg_darker, fg=self.text_color,
+                               padx=10, pady=5)
+        preview_label.pack(side=tk.LEFT)
+
+        # Control buttons
+        controls_frame = tk.Frame(header_frame, bg=self.bg_darker)
+        controls_frame.pack(side=tk.RIGHT, padx=5)
+
+        start_btn = ttk.Button(controls_frame, text="Start Simulation", 
+                             command=self.start_simulation)
+        start_btn.pack(side=tk.LEFT, padx=2)
+
+        stop_btn = ttk.Button(controls_frame, text="Stop Simulation", 
+                            command=self.stop_simulation)
+        stop_btn.pack(side=tk.LEFT, padx=2)
+
+        # Canvas for simulation rendering
+        self.sim_canvas = tk.Canvas(preview_frame, bg=self.bg_darker,
+                                  width=800, height=600)
+        self.sim_canvas.pack(fill=tk.BOTH, expand=True)
         
     def populate_tree(self):
         project = self.tree.insert("", "end", text="MyProject", open=True)
